@@ -381,7 +381,7 @@ body:not(.adm) .chip[data-go]{cursor:default}
       <label>فترة التقرير (أيام) <input type="number" id="pfDays" min="1" step="1" style="width:70px"></label>
       <label>استوك قليل لو يكفي أقل من (أيام) <input type="number" id="pfLow" min="0" step="0.5" style="width:70px"></label>
       <label>ربحية ضعيفة لو أقل من (% من الهدف) <input type="number" id="pfWeak" min="0" max="100" step="5" style="width:70px"></label>
-      <label>طلب عالي = أعلى (% من الأصناف أوردرات) <input type="number" id="pfTop" min="1" max="100" step="5" style="width:70px"></label>
+      <label>طلب عالي = أعلى (% من الأصناف، أوردرات أو كراتين) <input type="number" id="pfTop" min="1" max="100" step="5" style="width:70px"></label>
     </div>
   </div>
   <div id="pfChart" style="margin-top:14px"></div>
@@ -1897,7 +1897,7 @@ setInterval(()=>{if(!document.hidden)loadPack();},600000);
    ============================================================ */
 const pf={rows:[],file:'',ts:0,days:1,low:2,weak:50,top:30,inv:{},sel:'all',selInv:'all',page:0};
 const PF_ACTS=[
- ['close','اقفل الكمية / الصنف','--err'],['nostock','مفيش استوك','--ink3'],['cut','قلل الكمية','--warn'],['price','عدّل السعر','--info'],
+ ['close','اقفل الكمية / الصنف','--err'],['nostock','مفيش استوك','--ink3'],['cut','قلل الكمية','--warn'],['price','نزّل السعر للمقترح','--info'],['priceUp','ارفع السعر للمقترح','--ok'],
  ['holdq','ثبّت الكمية (استوك قليل)','--info'],['raise','زوّد الكمية','--ok'],['keep','سيبه زي ما هو','--ink3'],['hold','متجيش جنبه','--line'],['bundle','مراجعة يدوية','--line']];
 const PF_LABEL=Object.fromEntries(PF_ACTS.map(a=>[a[0],a[1]]));
 const PF_INV={out:'اخرجه برا الفاتورة',in:'خليه جوة الفاتورة',na:'مش مطلوب'};
@@ -1917,46 +1917,59 @@ function parsePerf(ws){
 function pfEval(){
   const days=Math.max(1,+pf.days||1),lowD=+pf.low||0,weakF=(+pf.weak||0)/100;
   const ords=pf.rows.map(r=>r.orders||0).sort((a,b)=>a-b);
-  const thr=ords.length?ords[Math.min(ords.length-1,Math.floor(ords.length*(1-(+pf.top||30)/100)))]:Infinity;
+  const qa=a=>a.length?a[Math.min(a.length-1,Math.floor(a.length*(1-(+pf.top||30)/100)))]:Infinity;
+  const thr=qa(ords),thrC=qa(pf.rows.map(r=>r.cases||0).sort((a,b)=>a-b));
   const list=pf.rows.map(r=>{
     const o={r,sku:r.sku,orders:r.orders,cases:r.cases,sales:r.sales,profit:r.profit,pre:r.pre,post:r.post,name:r.name,sugQty:null,reason:'',invRec:'na',invWhy:''};
     if(!D('skuC')?.get(r.sku)||/^[A-Za-z]/.test(r.sku)){o.bundle=true;o.act='bundle';o.reason='عرض مجمّع أو صنف مش موجود في SKU Code C: راجعه يدويًا';o.invWhy='مش مطلوب';return o;}
     const mo=mkClassify({sku:r.sku,price:null,minQty:1,maxQty:1}),x=mo.x;
     Object.assign(o,{name:x.name||r.name,cat:x.C?.cat||'',sub:x.C?.sub||'',brand:x.C?.brand||'',cls:x.cls||'',target:x.target,stock:x.stTot,mk:mo.k,my:mo.my,min:mo.min,sug:mo.sug,mSug:mo.mSug,mNow:mo.mNow,src:mo.src});
-    const m=(r.post!=null)?r.post:(r.sales>0&&r.profit!=null?r.profit/r.sales:null);o.m=m;
+    const m=(r.post!=null)?r.post:(r.sales>0&&r.profit!=null?r.profit/r.sales:null);o.m=m;o.buy=x.buy;
     o.cpd=r.cases/days;o.cover=(o.stock!=null&&o.cpd>0)?o.stock/o.cpd:null;o.avg=r.orders?r.cases/r.orders:null;
     const noStock=o.stock!=null&&o.stock<=0,low=o.stock!=null&&(noStock||(o.cover!=null&&o.cover<lowD));
-    const loss=(r.profit!=null&&r.profit<0)||(m!=null&&m<0),weak=m!=null&&m<o.target*weakF,good=m!=null&&m>=o.target,high=r.orders>0&&r.orders>=thr;
-    const worse=mo.k==='worse'&&mo.sug!=null&&mo.act==='cut';
-    const A=(c,why)=>{o.act=c;o.reason=why;};
+    const loss=(r.profit!=null&&r.profit<0)||(m!=null&&m<0),weak=m!=null&&m<o.target*weakF,good=m!=null&&m>=o.target,below=m!=null&&m<o.target;
+    const high=(r.orders>0&&r.orders>=thr)||(r.cases>0&&r.cases>=thrC);
+    const better=mo.k==='better',worseM=mo.k==='worse',sameM=mo.k==='same';
     const pc=v=>v==null?'—':(v*100).toFixed(1)+'%';
     const cov=o.cover!=null?` (يكفي ${o.cover.toFixed(1)} يوم)`:'';
-    const below=m!=null&&m<o.target;
-    if(x.rule&&/متجيش/.test(x.rule.oi||''))A('hold','تصنيفه «'+x.cls+'»: متعملوش عرض ولا تزوّد كميته');
-    else if(noStock)A('nostock','مفيش استوك دلوقتي: مفيش داعي لكمية أو عرض لحد ما يتورّد');
+    const mkTxt=mo.k==='better'?`أحسن من السوق (أرخص منافس ${fmt(mo.min)} وسعري ${fmt(mo.my)})`:mo.k==='worse'?`أوحش من السوق (أرخص منافس ${fmt(mo.min)} وسعري ${fmt(mo.my)})`:mo.k==='same'?'زي السوق':'مفيش بيانات منافسين';
+    const promoHurt=r.pre!=null&&m!=null&&r.pre-m>=0.01;
+    const hurtTxt=promoHurt?` (العرض نزّل الربحية من ${pc(r.pre)} لـ ${pc(m)})`:'';
+    const demand=`${fmt(r.orders,0)} أوردر و${fmt(r.cases)} كرتونة${high?' (طلب عالي)':''}`;
+    // سعر أعلى مقترح لو أنا أرخص من كل المنافسين: أرفع لحد أقل منافس ناقص الفرق المحدد
+    let up=null;if(better&&mo.min!=null&&mo.my&&x.buy!=null){const c=r2(Math.max(mo.my,mo.min-(mk.gap||0)));if(c>mo.my+0.005)up=c;}
+    o.upPrice=up;o.mUp=up?(up-x.buy)/up:null;
+    const A=(c,why)=>{o.act=c;o.reason=why;};
+    const oi=(x.rule?.oi||'').trim(),forceOut=/اجباري|يستحسن/.test(oi)&&!/لا يستحسن/.test(oi);
+    if(x.rule&&/متجيش/.test(oi))A('hold','تصنيفه «'+x.cls+'»: متعملوش عرض ولا تزوّد كميته');
+    else if(noStock)A('nostock','مفيش استوك دلوقتي: مفيش داعي لكمية أو عرض لحد ما يتورّد. '+demand);
+    else if(below&&up)A('priceUp',`أنا ${mkTxt} وربحيتي ${pc(m)} تحت الهدف ${pc(o.target)}${hurtTxt}: ارفع السعر لـ ${fmt(up)} (يفضّلني أرخص من السوق) وهتبقى الربحية ${pc(o.mUp)}. ${demand}`);
     else if(loss||weak){
-      const why=(loss?`بيخسّر (${pc(m)})`:`ربحيته ${pc(m)} أقل من الهدف ${pc(o.target)}`);
-      if(low)A('close',why+' والاستوك قليل'+cov+': لو اتطلب أكتر يخسّرني');
-      else if(loss&&!high)A('close',why+' وطلبه قليل');
-      else if(loss)A('cut',why+' وطلبه عالي: حدّد الكمية للأوردر علشان الخسارة متكبرش');
-      else if(high)A('keep',why+' بس طلبه عالي: سيب الكمية زي ما هي');
-      else A('cut',why+' وطلبه مش عالي: قلل الكمية');
+      const why=(loss?`بيخسّر (${pc(m)})`:`ربحيته ${pc(m)} أقل من الهدف ${pc(o.target)}`)+hurtTxt+`، وأنا ${mkTxt}`;
+      if(low)A('close',why+`، والاستوك قليل${cov}: لو اتطلب أكتر يخسّرني. ${demand}`);
+      else if(loss&&!high)A('close',why+`، وطلبه قليل (${demand}): اقفل الكمية`);
+      else if(loss)A('cut',why+`، وطلبه عالي (${demand}): حدّد الكمية للأوردر علشان الخسارة متكبرش`);
+      else if(high)A('keep',why+`، وطلبه عالي (${demand}): سيب الكمية وخليه برا الفاتورة`);
+      else A('cut',why+`، وطلبه مش عالي (${demand}): قلل الكمية${promoHurt?' أو وقّف العرض':''}`);
     }else if(good){
-      if(low)A('holdq',`ربحيته حلوة (${pc(m)}) بس الاستوك قليل${cov}: ماتزودش الكمية قبل ما الاستوك يتجدد`);
-      else if(worse)A('price',`ربحيته حلوة (${pc(m)}) لكن أوحش من السوق: نزّل السعر للمقترح قبل ما تزوّد الكمية`);
-      else A('raise',`ربحيته حلوة (${pc(m)}) والاستوك كويس${cov}: زوّد الكمية علشان يبيع أكتر`);
+      if(low)A('holdq',`ربحيته حلوة (${pc(m)}) وأنا ${mkTxt}، بس الاستوك قليل${cov}: ماتزودش الكمية قبل ما الاستوك يتجدد. ${demand}`);
+      else if(worseM&&mo.sug!=null&&mo.act==='cut')A('price',`ربحيته حلوة (${pc(m)}) لكن ${mkTxt}: نزّل السعر لـ ${fmt(mo.sug)} (الربحية هتبقى ${pc(mo.mSug)}) قبل ما تزوّد الكمية. ${demand}`);
+      else A('raise',`ربحيته حلوة (${pc(m)}) قبل العرض ${pc(r.pre)}، وأنا ${mkTxt}، والاستوك كويس${cov}: زوّد الكمية علشان يبيع أكتر. ${demand}`);
     }else{
-      if(low)A('cut',`ربحيته ${pc(m)} والاستوك قليل${cov}: قلل الكمية`);
-      else if(worse)A('price',`أوحش من السوق وربحيته ${pc(m)}: عدّل السعر للمقترح`);
-      else A('keep',m==null?'مفيش بيانات ربحية كفاية':`ربحيته ${pc(m)} قريبة من الهدف: سيبه`);
+      if(low)A('cut',`ربحيته ${pc(m)} والاستوك قليل${cov} وأنا ${mkTxt}: قلل الكمية`);
+      else A('keep',m==null?'مفيش بيانات ربحية كفاية':`ربحيته ${pc(m)} قريبة من الهدف ${pc(o.target)} وأنا ${mkTxt}: سيبه. ${demand}`);
     }
-    /* الفاتورة: برا / جوة بناءً على الاستوك والربحية والطلب */
-    const oiRule=x.rule?.oi?` (البرشامه: ${x.rule.oi})`:'';
-    if(['hold','nostock','close'].includes(o.act)){o.invRec='na';o.invWhy=o.act==='hold'?'مش مطلوب: الصنف متجيش جنبه':o.act==='nostock'?'مش مطلوب: مفيش استوك':'مش مطلوب: الكمية مقفولة'+oiRule;}
-    else if(below&&high&&!low){o.invRec='out';o.invWhy=`اخرجه برا الفاتورة: طلبه عالي (${fmt(r.orders,0)} أوردر) وربحيته ${pc(m)} أقل من الهدف ${pc(o.target)} والاستوك كويس${cov}. العميل هيضطر يكمّل الحد الأدنى بأصناف تانية${oiRule}.`;}
-    else if(good){o.invRec='in';o.invWhy=`خليه جوة الفاتورة: ربحيته ${pc(m)} فوق الهدف ${pc(o.target)}${low?' (الاستوك قليل فخلي الكمية صغيرة)':' والاستوك كويس'}: بيساهم في الحد الأدنى ويزوّد البيع${oiRule}.`;}
-    else if(below&&!high){o.invRec='in';o.invWhy=`خليه جوة الفاتورة: طلبه مش عالي فمفيش فايدة من إخراجه${oiRule}.`;}
-    else{o.invRec='in';o.invWhy=`خليه جوة الفاتورة: الاستوك قليل${cov} فإخراجه مش هيفرق${oiRule}.`;}
+    if(o.act==='price'&&mo.sug!=null)o.sugPrice=mo.sug;else if(o.act==='priceUp')o.sugPrice=up;
+    /* الفاتورة: البرشامه (يستحسن/اجباري = برا إجباري) ثم الاستوك والربحية والطلب والسوق */
+    if(o.act==='hold'){o.invRec='na';o.invWhy='مش مطلوب: الصنف متجيش جنبه';}
+    else if(forceOut){o.invRec='out';o.invWhy=`برا الفاتورة: البرشامه بتقول «${oi}» لتصنيف «${x.cls}» يعني لازم يخرج برا الفاتورة. ${demand}، وأنا ${mkTxt}${o.act==='nostock'?'، ومفيش استوك دلوقتي':''}.`;}
+    else if(['nostock','close'].includes(o.act)){o.invRec='na';o.invWhy=o.act==='nostock'?'مش مطلوب: مفيش استوك':'مش مطلوب: الكمية مقفولة';}
+    else if(/لا يستحسن/.test(oi)){o.invRec='in';o.invWhy=`جوة الفاتورة: البرشامه بتقول «${oi}» إخراجه. ${demand}، وأنا ${mkTxt}.`;}
+    else if(below&&high&&!low&&o.act!=='priceUp'){o.invRec='out';o.invWhy=`برا الفاتورة: ${demand}، وربحيته ${pc(m)} أقل من الهدف ${pc(o.target)}${hurtTxt}، وأنا ${mkTxt}، والاستوك كويس${cov}. العميل هيضطر يكمّل الحد الأدنى بأصناف تانية.`;}
+    else if(good){o.invRec='in';o.invWhy=`جوة الفاتورة: ربحيته ${pc(m)} فوق الهدف ${pc(o.target)}، وأنا ${mkTxt}${low?'، والاستوك قليل فخلي الكمية صغيرة':'، والاستوك كويس'}: بيساهم في الحد الأدنى ويزوّد البيع.`;}
+    else if(o.act==='priceUp'){o.invRec='in';o.invWhy=`جوة الفاتورة: هنعالج الربحية برفع السعر مش بإخراجه. ${demand}.`;}
+    else if(below&&!high){o.invRec='in';o.invWhy=`جوة الفاتورة: طلبه مش عالي (${demand}) فمفيش فايدة من إخراجه.`;}
+    else{o.invRec='in';o.invWhy=`جوة الفاتورة: الاستوك قليل${cov} فإخراجه مش هيفرق. ${demand}.`;}
     const st=o.stock;
     if(o.act==='raise'){const base=Math.ceil((o.avg||1)*2);o.sugQty=st!=null?Math.max(2,Math.min(base,Math.floor(st*0.3))):base;}
     else if(o.act==='nostock')o.sugQty=0;
@@ -1974,7 +1987,7 @@ const PF_SPEC=[null,
  {k:'pre',t:'num',pct:1,v:o=>o.pre},{k:'post',t:'num',pct:1,v:o=>o.m??null},{k:'target',t:'num',pct:1,v:o=>o.target??null},
  {k:'stock',t:'num',v:o=>o.stock??null},{k:'cover',t:'num',v:o=>o.cover??null},
  {k:'mk',t:'set',v:o=>o.mk?(MK_LABEL[o.mk]==='—'?'بدون سعر':MK_LABEL[o.mk]):null},{k:'my',t:'num',v:o=>o.my??null},{k:'min',t:'num',v:o=>o.min??null},
- {k:'sug',t:'num',v:o=>o.sug??null},{k:'qty',t:'num',v:o=>o.sugQty}];
+ {k:'sug',t:'num',v:o=>o.sugPrice??null},{k:'qty',t:'num',v:o=>o.sugQty}];
 TFS.perf=PF_SPEC;TF.perf={};
 function pfSave(){idb.set('pf',{rows:pf.rows,file:pf.file,ts:pf.ts,days:pf.days,low:pf.low,weak:pf.weak,top:pf.top,inv:pf.inv});}
 async function pfInit(){const v=await idb.get('pf');if(v&&v.rows)Object.assign(pf,v);}
@@ -1993,16 +2006,16 @@ function renderPerf(){
   window._pfList=list;
   const PG=200,pages=Math.max(1,Math.ceil(list.length/PG));if(pf.page>=pages)pf.page=pages-1;if(pf.page<0)pf.page=0;
   const off=pf.page*PG,view=list.slice(off,off+PG);
-  const bcol={nostock:'mute',close:'err',out:'warn',cut:'warn',price:'info',holdq:'info',raise:'ok',in:'ok',keep:'mute',hold:'mute',bundle:'mute'};
+  const bcol={priceUp:'ok',nostock:'mute',close:'err',out:'warn',cut:'warn',price:'info',holdq:'info',raise:'ok',in:'ok',keep:'mute',hold:'mute',bundle:'mute'};
   const pager=pages>1?`<div class="row" style="padding:8px 12px;justify-content:center"><button class="btn sm ghost" data-pfpg="-1" ${pf.page<=0?'disabled':''}>السابق</button><span class="small muted">صفحة ${pf.page+1} من ${pages} · ${list.length} صنف</span><button class="btn sm ghost" data-pfpg="1" ${pf.page>=pages-1?'disabled':''}>التالي</button></div>`:'';
   const P=v=>v==null?'—':pct(v);
-  $('#pfList').innerHTML=tfInject('perf',list.length?`<table class="grid"><thead><tr><th>#</th><th>SKU Code / الاسم</th><th>Category Name</th><th>Brand Name</th><th>الإجراء المقترح</th><th>الفاتورة</th><th>سبب الإجراء</th><th>سبب الفاتورة</th><th>أوردرات</th><th>كراتين</th><th>مبيعات</th><th>ربح</th><th>ربحية قبل العرض</th><th>ربحية فعلية</th><th>الهدف</th><th>استوك</th><th>يكفي (يوم)</th><th>السوق</th><th>سعري</th><th>أرخص منافس</th><th>سعر مقترح</th><th>كمية مقترحة / أوردر</th></tr></thead><tbody>${view.map((o,i)=>`<tr><td class="num">${off+i+1}</td><td><div class="mono sk">${esc(o.sku)}</div><div class="nm2">${esc(o.name)}</div></td><td>${esc(o.cat)||'—'}</td><td>${esc(o.brand)||'—'}</td><td><span class="badge ${bcol[o.act]}">${PF_LABEL[o.act]}</span></td><td><span class="badge ${o.invRec==='out'?'warn':o.invRec==='in'?'ok':'mute'}">${PF_INV[o.invRec]}</span></td><td class="small" style="min-width:260px;white-space:normal">${esc(o.reason)}</td><td class="small" style="min-width:260px;white-space:normal">${esc(o.invWhy)}</td><td class="num">${fmt(o.orders,0)}</td><td class="num">${fmt(o.cases)}</td><td class="num">${fmt(o.sales,0)}</td><td class="num ${o.profit<0?'c-err':''}">${fmt(o.profit,0)}</td><td class="num">${P(o.pre)}</td><td class="num ${o.m!=null&&o.m<0?'c-err':''}">${P(o.m??null)}</td><td class="num">${P(o.target??null)}</td><td class="num">${o.bundle?'—':fmt(o.stock)}</td><td class="num">${o.cover==null?'—':o.cover.toFixed(1)}</td><td>${o.mk?(MK_LABEL[o.mk]==='—'?'—':MK_LABEL[o.mk]):'—'}</td><td class="num">${fmt(o.my)}</td><td class="num">${fmt(o.min)}</td><td class="num">${fmt(o.sug)}</td><td class="num">${o.sugQty==null?'—':o.sugQty}</td></tr>`).join('')}</tbody></table>${pager}`:'<div class="empty">مفيش أصناف في الفلتر ده</div>');
+  $('#pfList').innerHTML=tfInject('perf',list.length?`<table class="grid"><thead><tr><th>#</th><th>SKU Code / الاسم</th><th>Category Name</th><th>Brand Name</th><th>الإجراء المقترح</th><th>الفاتورة</th><th>سبب الإجراء</th><th>سبب الفاتورة</th><th>أوردرات</th><th>كراتين</th><th>مبيعات</th><th>ربح</th><th>ربحية قبل العرض</th><th>ربحية فعلية</th><th>الهدف</th><th>استوك</th><th>يكفي (يوم)</th><th>السوق</th><th>سعري</th><th>أرخص منافس</th><th>سعر مقترح</th><th>كمية مقترحة / أوردر</th></tr></thead><tbody>${view.map((o,i)=>`<tr><td class="num">${off+i+1}</td><td><div class="mono sk">${esc(o.sku)}</div><div class="nm2">${esc(o.name)}</div></td><td>${esc(o.cat)||'—'}</td><td>${esc(o.brand)||'—'}</td><td><span class="badge ${bcol[o.act]}">${PF_LABEL[o.act]}</span></td><td><span class="badge ${o.invRec==='out'?'warn':o.invRec==='in'?'ok':'mute'}">${PF_INV[o.invRec]}</span></td><td class="small" style="min-width:260px;white-space:normal">${esc(o.reason)}</td><td class="small" style="min-width:260px;white-space:normal">${esc(o.invWhy)}</td><td class="num">${fmt(o.orders,0)}</td><td class="num">${fmt(o.cases)}</td><td class="num">${fmt(o.sales,0)}</td><td class="num ${o.profit<0?'c-err':''}">${fmt(o.profit,0)}</td><td class="num">${P(o.pre)}</td><td class="num ${o.m!=null&&o.m<0?'c-err':''}">${P(o.m??null)}</td><td class="num">${P(o.target??null)}</td><td class="num">${o.bundle?'—':fmt(o.stock)}</td><td class="num">${o.cover==null?'—':o.cover.toFixed(1)}</td><td>${o.mk?(MK_LABEL[o.mk]==='—'?'—':MK_LABEL[o.mk]):'—'}</td><td class="num">${fmt(o.my)}</td><td class="num">${fmt(o.min)}</td><td class="num">${fmt(o.sugPrice)}</td><td class="num">${o.sugQty==null?'—':o.sugQty}</td></tr>`).join('')}</tbody></table>${pager}`:'<div class="empty">مفيش أصناف في الفلتر ده</div>');
 }
 function pfExport(){
   const l=window._pfList||[];if(!l.length)return toast('مفيش حاجة للتصدير',true);
   const p=v=>v==null?null:Math.round(v*10000)/100,q=v=>v==null?null:Math.round(v*100)/100;
   const aoa=[['SKU','Name','Category Name','SubCategory Name','Brand Name','Class','Recommended Action','Out of Invoice?','Reason','Invoice Reason','Orders','Cases','Gross Sales','Profit','Margin Pre Promo %','Margin Actual %','Target Margin %','Stock (cases)','Stock Covers (days)','Market','My Price','Cheapest Competitor','Suggested Price','Suggested Max Qty per Order'],
-    ...l.map(o=>[o.sku,o.name,o.cat||'',o.sub||'',o.brand||'',o.cls||'',PF_LABEL[o.act],PF_INV[o.invRec],o.reason,o.invWhy,o.orders,q(o.cases),q(o.sales),q(o.profit),p(o.pre),p(o.m??null),p(o.target??null),o.bundle?null:q(o.stock),q(o.cover),o.mk?MK_LABEL[o.mk]:'',o.my??null,o.min??null,o.sug??null,o.sugQty])];
+    ...l.map(o=>[o.sku,o.name,o.cat||'',o.sub||'',o.brand||'',o.cls||'',PF_LABEL[o.act],PF_INV[o.invRec],o.reason,o.invWhy,o.orders,q(o.cases),q(o.sales),q(o.profit),p(o.pre),p(o.m??null),p(o.target??null),o.bundle?null:q(o.stock),q(o.cover),o.mk?MK_LABEL[o.mk]:'',o.my??null,o.min??null,o.sugPrice??null,o.sugQty])];
   const ws=XLSX.utils.aoa_to_sheet(aoa);ws['!cols']=[{wch:16},{wch:42},{wch:18},{wch:18},{wch:16},{wch:24},{wch:26},{wch:22},{wch:70},{wch:70},...Array(14).fill({wch:13})];
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Actions');saveWB(wb,`Performance_Actions_${stamp()}.xlsx`);
   toast(`اتصدّر ${l.length} صنف`);
