@@ -142,6 +142,7 @@ td.in.price input{font-weight:700;border-color:var(--brand)}
 /* column filters */
 .cf{display:block;width:100%;min-width:76px;margin-top:4px;padding:2px 6px!important;font-size:12px;font-weight:400;border-radius:6px!important}
 .fcount{font-size:12.5px;color:var(--ink2)}
+td.actcell{white-space:normal!important;min-width:150px;max-width:230px;font-size:12.5px;line-height:1.5;font-weight:600}
 .cfb{display:block;width:100%;min-width:92px;margin-top:4px;padding:3px 8px;font-size:12px;font-weight:500;text-align:start;border:1px solid var(--line);background:var(--surface);color:var(--ink2);border-radius:6px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px}
 .cfb:hover{border-color:var(--brand)}
 .cfb.on{background:var(--brand-soft);border-color:var(--brand);color:var(--ink);font-weight:700}
@@ -732,7 +733,59 @@ function ctx(r){
     if(x.buy==null)f.push(['warn','مفيش تكلفة']);
   }
   x.flags=f;
+  x.act=preAct(x,r);
   return x;
+}
+
+/* الإجراء قبل العرض: البرشامه (فاتورة/سعة/تسعير) + الاستوك + ربحية العرض + سعر السوق */
+function preAct(x,r){
+  if(!x.found||!x.price)return null;
+  const S=state.set,t=x.target,m=x.m,st=x.stTot,k=x.mk.k,rl=x.rule||{};
+  const oi=(rl.oi||'').trim(),capR=(rl.cap||'').trim(),pp=(rl.pp||'').trim();
+  const forceOut=/اجباري|يستحسن/.test(oi)&&!/لا يستحسن/.test(oi),notOut=/لا يستحسن/.test(oi);
+  const mq=r.maxQty||S.defMax||1,noStock=st!=null&&st<=0,low=st!=null&&!noStock&&st<mq*3;
+  const below=m!=null&&m<t-1e-9,loss=m!=null&&m<0;
+  const pc=v=>v==null?'—':(v*100).toFixed(1)+'%',gap=mk.gap||0;
+  // سعر أنزل/أعلى مقترح من السوق
+  let down=null,up=null;
+  if(x.mk.min!=null){
+    let c=r2(x.mk.min-gap);const fl=x.minAt!=null?Math.ceil(x.minAt*100)/100:null;if(fl!=null&&c<fl)c=fl;
+    if(c<x.price-0.005&&(k==='worse'||k==='same'))down=c;
+    if(k==='better'&&x.buy!=null){const u=r2(Math.max(x.price,x.mk.min-gap));if(u>x.price+0.005)up=u;}
+  }
+  const mUp=up&&x.buy!=null?(up-x.buy)/up:null,mDown=down&&x.buy!=null?(down-x.buy)/down:null;
+  const wantDown=down!=null&&((/احسن من السوق/.test(pp)&&k!=='better')||(/نافس/.test(pp)&&k==='worse')||k==='worse');
+  const wantUp=up!=null&&(below||/اعلى من السوق/.test(pp));
+  const capN=/محدد جدا/.test(capR)?x.cashIn:/^محدد$/.test(capR)?x.cashOut:null;
+  let capSug=capN;if(low)capSug=Math.max(1,Math.min(capSug??Infinity,Math.floor(st/3)));
+  const tip=`البرشامه: ${x.cls||'—'} · الفاتورة: ${oi||'—'} · السعة: ${capR||'—'} · التسعير: ${pp||'—'} | الاستوك: ${st==null?'غير محمّل':fmt(st)} | الربحية بعد العرض: ${pc(m)} (الهدف ${pc(t)}) | السوق: ${MK_LABEL[k]}${x.mk.min!=null?` (أرخص منافس ${fmt(x.mk.min)})`:''}`;
+  const parts=[];let code='ok';
+  if(/متجيش/.test(oi)){code='no';parts.push('متعملوش عرض (تصنيفه To be Delisted)');}
+  else if(noStock){code='no';parts.push('متعملوش عرض: مفيش استوك');}
+  else if(loss){code='close';parts.push(`اقفل الكمية (Max Qty = 1): العرض بخسّر ${pc(m)}`);if(forceOut)parts.push('واخرجه برا الفاتورة (البرشامه)');}
+  else if(below&&low){code='close';parts.push(`اقفل الكمية: ربحية ${pc(m)} تحت الهدف ${pc(t)} والاستوك قليل (${fmt(st)})`);if(forceOut)parts.push('واخرجه برا الفاتورة (البرشامه)');}
+  else{
+    if(forceOut)code='out';else if(below&&!notOut&&!wantUp)code='out';else if(wantUp||wantDown)code='price';else if(capSug!=null)code='cap';else if(/افتح/.test(capR)&&!below&&k!=='worse')code='raise';
+    if(code==='out')parts.push(forceOut?`اخرجه برا الفاتورة (البرشامه: ${oi})`:`اخرجه برا الفاتورة: ربحيته ${pc(m)} تحت الهدف ${pc(t)}`);
+    if(wantUp)parts.push(`ارفع السعر لـ ${fmt(up)} (لسه أرخص من السوق، الربحية ${pc(mUp)})`);
+    else if(wantDown)parts.push(`نزّل السعر لـ ${fmt(down)} (الربحية ${pc(mDown)})`);
+    if(capSug!=null)parts.push(`حدّد Max Qty = ${capSug}${low?' (الاستوك قليل)':''}${r.maxQty>capSug?` — حاليًا ${r.maxQty}`:''}`);
+    if(code==='raise')parts.push('افتح/زوّد الكمية (البرشامه: افتح كميات والربحية تمام)');
+    if(code==='ok')parts.push(below?`ربحيته ${pc(m)} تحت الهدف`:`العرض تمام: ربحية ${pc(m)} والسعر مناسب للسوق`);
+    if(pp&&/احسن من السوق/.test(pp)&&k!=='better'&&!wantDown&&k!=='nodata'&&k!=='noprice')parts.push('(البرشامه عايزاك أحسن من السوق بس حد المارجين مش بيسمح)');
+  }
+  const L={no:'متعملوش عرض',close:'اقفل الكمية',out:'اخرجه برا الفاتورة',price:'عدّل السعر',cap:'حدّد الكمية',raise:'زوّد الكمية',ok:'العرض تمام'};
+  const C={no:'c-err',close:'c-err',out:'c-warn',price:'c-info',cap:'c-warn',raise:'c-ok',ok:'c-ok'};
+  // الصيغة المختصرة: الفاتورة + الكمية + السعر
+  const sh=[];
+  if(code==='no')sh.push('متعملوش عرض');
+  else if(code==='close'){if(forceOut)sh.push('برا الفاتورة');sh.push('اقفل الكمية');}
+  else{
+    sh.push(code==='out'||forceOut?'برا الفاتورة':'جوة الفاتورة');
+    if(wantUp)sh.push('ارفع السعر '+fmt(up));else if(wantDown)sh.push('نزّل السعر '+fmt(down));
+    if(capSug!=null)sh.push('حدّد الكمية '+capSug);else if(code==='raise')sh.push('افتح الكمية');
+  }
+  return {code,label:L[code],cls:C[code],text:sh.join(' + '),tip:parts.join(' + ')+' ⇐ '+tip};
 }
 
 /* ============================================================
@@ -745,6 +798,7 @@ const COLS=[
  {k:'buy',l:'Case Buying Price After Back Margin',g:'promo',num:1,get:x=>({t:fmt(x.buy)})},
  {k:'price',l:'promo price',g:'promo',input:'price'},
  {k:'margin',l:'Margin بعد العرض %',g:'promo',input:'margin'},
+ {k:'act',l:'الإجراء قبل العرض',g:'promo',key:x=>x.act?.text.replace(/ [\d.,]+/g,''),get:x=>x.act?{t:x.act.text,c:'actcell '+x.act.cls,title:x.act.tip}:{t:'اكتب سعر البرموشن',c:'c-mute'}},
  {k:'mkt',l:'مقارنة السوق',g:'promo',get:x=>({t:MK_LABEL[x.mk.k],c:x.mk.k==='better'?'c-ok':x.mk.k==='worse'?'c-err':x.mk.k==='same'?'c-info':'c-mute',title:x.mk.min?`سعرك (${x.mk.src}) ${fmt(x.mk.my)} · أقل منافس ${fmt(x.mk.min)} (${x.mk.who}) · متوسط ${fmt(x.mk.avg)} · أعلى منافس ${fmt(x.mk.max)}`:'مفيش بيانات منافس'})},
  {k:'mkd',l:'الفرق عن أرخص منافس %',g:'promo',num:1,get:x=>({t:x.mk.diff==null?'—':(x.mk.diff>0?'+':'')+pct(x.mk.diff),c:x.mk.diff==null?'c-mute':x.mk.k==='better'?'c-ok':x.mk.k==='worse'?'c-err':'c-info',title:'سعرك المستخدم: '+(x.mk.src||'—')})},
  {k:'creditP',l:'سعر برموشن الأجل',g:'promo',num:1,get:x=>({t:fmt(x.creditP),title:'سعر العرض كاش + '+state.set.creditUp+'%'})},
@@ -799,7 +853,7 @@ const COLS=[
 /* ============================================================
    table render
    ============================================================ */
-const SIMPLE=['name','cat','buy','p1','m1','price','margin','mkt','mkd','creditP','mCredit','status','maxQ','minQ','cMaxQ','cMinQ','cmp','maxab','ben','sanad','cart','p3','cls','units','piece','oC','stC','oG','stG','stT','cur','curEnd'];
+const SIMPLE=['name','cat','buy','p1','m1','price','margin','act','mkt','mkd','creditP','mCredit','status','maxQ','minQ','cMaxQ','cMinQ','cmp','maxab','ben','sanad','cart','p3','cls','units','piece','oC','stC','oG','stG','stT','cur','curEnd'];
 const NUMV={mkd:x=>x.mk.diff==null?null:x.mk.diff*100,cMinQ:x=>x.r.minQtyC,cMaxQ:x=>x.r.maxQtyC,creditP:x=>x.creditP,mCredit:x=>x.mCredit==null?null:x.mCredit*100,buy:x=>x.buy,price:x=>x.price,margin:x=>x.m==null?null:x.m*100,target:x=>x.target*100,minAt:x=>x.minAt,minQ:x=>x.r.minQty,maxQ:x=>x.r.maxQty,p1:x=>x.p1,p3:x=>x.p3,m1:x=>x.m1==null?null:x.m1*100,maxab:x=>x.maxab,ben:x=>x.ben,sanad:x=>x.sanad,cart:x=>x.cart?.price??null,vs:x=>x.vsComp==null?null:x.vsComp*100,stC:x=>x.stC,stG:x=>x.stG,stT:x=>x.stTot,oC:x=>x.ordC,oG:x=>x.ordG,units:x=>x.units,piece:x=>x.piece,cur:x=>x.offer?.value??null,credit:x=>x.credit,gold:x=>x.gold,cashIn:x=>x.cashIn,cashOut:x=>x.cashOut,crIn:x=>x.crIn,crOut:x=>x.crOut,gIn:x=>x.gIn,gOut:x=>x.gOut,w:x=>x.w,nmvNow:x=>x.nmvNow,nmvP:x=>x.nmvPromo};
 function testNum(q,v){
   q=q.trim().replace(/[%٪]/g,'');if(!q)return true;
@@ -823,6 +877,7 @@ const EMPTY='(فاضي)',NOFLAG='(بدون تنبيه)';
 function keysOf(c,x){
   if(c.status)return x.flags.length?x.flags.map(f=>f[1]):[NOFLAG];
   if(NUMV[c.k]){const v=NUMV[c.k](x);return [v==null?EMPTY:PCT.has(c.k)?r2(v).toFixed(1)+'%':String(r2(v))];}
+  if(c.key)return [c.key(x)||EMPTY];
   if(c.input)return [EMPTY];
   const t=colText(c,x).trim();return [!t||t==='—'?EMPTY:t];
 }
@@ -1119,7 +1174,7 @@ function exportFull(){
   const head=['Category Name','SKU Code','Name','Case Buying Price After Back Margin','promo price','promo price أجل','Compare','Maxab','Ben Soliman','Sanad','Cartona','pl1','pl3','Classification','Num Of Units Per Case','Piece','orders C','stock C','orders G','stock G','مجموع الاستوك','Margin','Margin after Discount','Max Qty','Min Qty أجل','Max Qty أجل','سعر العرض الحالي','تاريخ انتهاء العرض الحالي','سعر الاجل','سعر الجولد','حاله سعر الاجل','Weight','NMV Per Ton','NMV Per Ton naw','Classification2','Out Of Invoice','Capacity','Pricing & Promotions','Target Prof','cash in','cash out','credit in','credit out','gold in','gold out'];
   const n=v=>v==null?null:(typeof v==='number'?r2(v*10000)/10000:v);
   const rows=expRows().map(r=>{const x=ctx(r);return [x.C?.cat||x.G?.cat||'',r.sku,x.name,n(x.buy),n(x.price),n(x.creditP),x.cmp,n(x.maxab),n(x.ben),n(x.sanad),n(x.cart?.price),n(x.p1),n(x.p3),x.cls,x.units,n(x.piece),n(x.ordC),n(x.stC),n(x.ordG),n(x.stG),n(x.stTot),n(x.m1),n(x.m),r.maxQty,r.minQtyC??r.minQty,r.maxQtyC??r.maxQty,x.offer?n(x.offer.value):null,x.offer?fmtDate(x.offerEnd):'',n(x.credit),n(x.gold),x.creditOk,n(x.w),n(x.nmvPromo),n(x.nmvNow),x.cls,x.rule?.oi??'',x.rule?.cap??'',x.rule?.pp??'',x.rule?x.rule.tp/100:null,x.cashIn,x.cashOut,x.crIn,x.crOut,x.gIn,x.gOut];});
-  const ws=XLSX.utils.aoa_to_sheet([head,...rows]);ws['!cols']=head.map((h,i)=>({wch:i===2?40:Math.max(11,h.length+2)}));
+  const er=expRows();const ws=XLSX.utils.aoa_to_sheet([[...head,'Pre-Offer Action','Action Details'],...rows.map((a,i)=>{const x=ctx(er[i]);return [...a,x.act?x.act.text:'',x.act?x.act.tip:''];})]);ws['!cols']=head.map((h,i)=>({wch:i===2?40:Math.max(11,h.length+2)}));
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Promotions');
   saveWB(wb,`Promotions_${stamp()}.xlsx`);toast('اتصدّر ملف التحليل');
 }
